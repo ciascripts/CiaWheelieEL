@@ -7,7 +7,14 @@ final class Discovery: ObservableObject {
     struct Found: Identifiable {
         var id: String { source.url }
         let repo: String
+        let stars: Int?
         let source: AltSource
+    }
+
+    enum Sort: String, CaseIterable, Identifiable {
+        case stars, updated
+        var id: String { rawValue }
+        var title: String { self == .stars ? "Most Stars" : "Recently Updated" }
     }
 
     static let presets = [
@@ -23,6 +30,7 @@ final class Discovery: ObservableObject {
     @Published private(set) var isSearching = false
     @Published private(set) var status: String?
     @Published private(set) var canLoadMore = false
+    @Published var sort: Sort = .stars
 
     private var query = ""
     private var page = 1
@@ -48,12 +56,14 @@ final class Discovery: ObservableObject {
     func cancel() {
         searchTask?.cancel()
         isSearching = false
+        status = results.isEmpty ? nil : "Stopped. Found \(results.count) source\(results.count == 1 ? "" : "s")."
     }
 
     private struct SearchResponse: Decodable {
         struct Repo: Decodable {
             let full_name: String
             let default_branch: String
+            let stargazers_count: Int?
         }
         let total_count: Int
         let items: [Repo]
@@ -73,7 +83,7 @@ final class Discovery: ObservableObject {
         var comps = URLComponents(string: "https://api.github.com/search/repositories")!
         comps.queryItems = [
             .init(name: "q", value: query),
-            .init(name: "sort", value: "updated"),
+            .init(name: "sort", value: sort.rawValue),
             .init(name: "per_page", value: "30"),
             .init(name: "page", value: String(page)),
         ]
@@ -101,35 +111,40 @@ final class Discovery: ObservableObject {
         status = "Checking \(repos.count) repositories…"
         await withTaskGroup(of: Found?.self) { group in
             for repo in repos {
-                let name = repo.full_name, branch = repo.default_branch
-                group.addTask { await SourceProbe.probe(name, branch: branch) }
+                let name = repo.full_name, branch = repo.default_branch, stars = repo.stargazers_count
+                group.addTask { await SourceProbe.probe(name, branch: branch, stars: stars) }
             }
             for await found in group {
                 checked += 1
-                status = "Checked \(checked)/\(repos.count) repositories…"
+                if !Task.isCancelled { status = "Checked \(checked) of \(repos.count) repositories…" }
                 if let found, !results.contains(where: { $0.id == found.id }) {
                     results.append(found)
                 }
             }
         }
 
-        // Second pass: repos without a well-known file name - list their root
+        // Second pass: repos without a well-known file name. List their root
         // .json files through the GitHub API (rate limited, so best effort).
         let missing = repos.filter { r in !results.contains { $0.repo == r.full_name } }
         for repo in missing where !rateLimited && !Task.isCancelled {
-            if let found = await probeViaContents(repo.full_name), !results.contains(where: { $0.id == found.id }) {
+            if let found = await probeViaContents(repo.full_name, stars: repo.stargazers_count),
+               !results.contains(where: { $0.id == found.id }) {
                 results.append(found)
             }
         }
 
+        if sort == .stars {
+            results.sort { ($0.stars ?? 0) > ($1.stars ?? 0) }
+        }
+
         if !Task.isCancelled {
             var msg = results.isEmpty ? "No sources found in these repositories." : "Found \(results.count) source\(results.count == 1 ? "" : "s")."
-            if rateLimited { msg += " (GitHub API limit reached, some repos were skipped.)" }
+            if rateLimited { msg += " (GitHub's API limit was reached, so some repos were skipped.)" }
             status = msg
         }
     }
 
-    private func probeViaContents(_ repo: String) async -> Found? {
+    private func probeViaContents(_ repo: String, stars: Int?) async -> Found? {
         guard let url = URL(string: "https://api.github.com/repos/\(repo)/contents/") else { return nil }
         guard let response = try? await SourceFetcher.session.data(for: githubRequest(url)) else { return nil }
         let (data, resp) = response
@@ -138,15 +153,16 @@ final class Discovery: ObservableObject {
             return nil
         }
         guard let items = try? JSONDecoder().decode([ContentItem].self, from: data) else { return nil }
+        let ignored: Set<String> = ["package.json", "package-lock.json", "tsconfig.json", "renovate.json"]
         let jsonFiles = items.filter {
             $0.type == "file" && $0.name.lowercased().hasSuffix(".json")
                 && !SourceProbe.candidateFiles.contains($0.name)
-                && !["package.json", "package-lock.json", "tsconfig.json", "renovate.json"].contains($0.name.lowercased())
+                && !ignored.contains($0.name.lowercased())
         }
         for item in jsonFiles.prefix(5) {
             guard let dl = item.download_url else { continue }
-            if let source = try? await SourceFetcher.fetch(dl), !source.apps.isEmpty {
-                return Found(repo: repo, source: source)
+            if let source = try? await SourceFetcher.fetch(dl, cache: false), !source.apps.isEmpty {
+                return Found(repo: repo, stars: stars, source: source)
             }
         }
         return nil
@@ -169,12 +185,12 @@ enum SourceProbe {
         "sidestore.json", "app-repo.json", "altsource.json", "altstore-source.json", "apps.min.json",
     ]
 
-    static func probe(_ repo: String, branch: String) async -> Discovery.Found? {
+    static func probe(_ repo: String, branch: String, stars: Int?) async -> Discovery.Found? {
         for file in candidateFiles {
             if Task.isCancelled { return nil }
             let url = "https://raw.githubusercontent.com/\(repo)/\(branch)/\(file)"
-            if let source = try? await SourceFetcher.fetch(url), !source.apps.isEmpty {
-                return Discovery.Found(repo: repo, source: source)
+            if let source = try? await SourceFetcher.fetch(url, cache: false), !source.apps.isEmpty {
+                return Discovery.Found(repo: repo, stars: stars, source: source)
             }
         }
         return nil

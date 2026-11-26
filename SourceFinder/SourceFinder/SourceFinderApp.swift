@@ -4,28 +4,82 @@ import SwiftUI
 struct SourceFinderApp: App {
     @StateObject private var store = SourceStore()
     @StateObject private var discovery = Discovery()
+    @StateObject private var router = Router()
+    @StateObject private var toast = ToastCenter()
+    @StateObject private var recents = RecentSearches()
+
+    init() {
+        // A bigger cache keeps icons and screenshots from reloading while scrolling.
+        URLCache.shared = URLCache(memoryCapacity: 64 * 1024 * 1024, diskCapacity: 512 * 1024 * 1024, directory: nil)
+    }
 
     var body: some Scene {
         WindowGroup {
             ContentView()
                 .environmentObject(store)
                 .environmentObject(discovery)
-                .task { await store.refreshAll() }
+                .environmentObject(router)
+                .environmentObject(toast)
+                .environmentObject(recents)
         }
     }
 }
 
 struct ContentView: View {
+    @EnvironmentObject private var store: SourceStore
+    @EnvironmentObject private var router: Router
+
     var body: some View {
-        TabView {
-            AppSearchView()
-                .tabItem { Label("Apps", systemImage: "magnifyingglass") }
-            SourcesView()
-                .tabItem { Label("My Sources", systemImage: "tray.full") }
+        TabView(selection: $router.tab) {
+            BrowseView()
+                .tabItem { Label("Browse", systemImage: "square.grid.2x2.fill") }
+                .tag(Router.Tab.browse)
             DiscoverView()
-                .tabItem { Label("Discover", systemImage: "globe") }
+                .tabItem { Label("Discover", systemImage: "sparkles") }
+                .tag(Router.Tab.discover)
+            SourcesView()
+                .tabItem { Label("Sources", systemImage: "tray.full.fill") }
+                .tag(Router.Tab.sources)
         }
+        .overlay(alignment: .top) { ToastOverlay() }
+        .task { await store.start() }
     }
+}
+
+@MainActor
+final class Router: ObservableObject {
+    enum Tab: Hashable { case browse, discover, sources }
+    @Published var tab: Tab = .browse
+    /// Set this to open Discover's GitHub search with the given text.
+    @Published var pendingGitHubQuery: String?
+}
+
+@MainActor
+final class RecentSearches: ObservableObject {
+    private static let key = "recentSearches"
+    @Published private(set) var items: [String]
+
+    init() {
+        items = UserDefaults.standard.stringArray(forKey: Self.key) ?? []
+    }
+
+    func add(_ term: String) {
+        let t = term.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard t.count >= 2 else { return }
+        items.removeAll { $0.caseInsensitiveCompare(t) == .orderedSame }
+        items.insert(t, at: 0)
+        if items.count > 8 { items = Array(items.prefix(8)) }
+        UserDefaults.standard.set(items, forKey: Self.key)
+    }
+
+    func clear() {
+        items = []
+        UserDefaults.standard.removeObject(forKey: Self.key)
+    }
+}
+
+enum Prefs {
+    static let preferredStoreKey = "preferredStore"
 }
 
 /// Builds sidestore:// and altstore:// links.
@@ -52,40 +106,35 @@ enum DeepLink {
     }
 }
 
-/// Opens a URL and shows an alert if no installed app handles it.
-struct LinkOpener: ViewModifier {
-    @Binding var failedTarget: String?
-    func body(content: Content) -> some View {
-        content.alert("Couldn't open link",
-                      isPresented: Binding(get: { failedTarget != nil }, set: { if !$0 { failedTarget = nil } })) {
-            Button("OK", role: .cancel) {}
-        } message: {
-            Text("\(failedTarget ?? "The app") doesn't seem to be installed on this device.")
-        }
+/// Opens SideStore or AltStore, and says so when it isn't installed.
+@MainActor
+enum Installer {
+    static func install(_ ipa: URL, with target: DeepLink.Store, openURL: OpenURLAction, toast: ToastCenter) {
+        launch(DeepLink.install(ipa, in: target), target: target, openURL: openURL, toast: toast)
     }
-}
 
-struct IconView: View {
-    let url: URL?
-    var size: CGFloat = 48
+    static func addSource(_ sourceURL: String, to target: DeepLink.Store, openURL: OpenURLAction, toast: ToastCenter) {
+        launch(DeepLink.addSource(sourceURL, in: target), target: target, openURL: openURL, toast: toast)
+    }
 
-    var body: some View {
-        AsyncImage(url: url) { phase in
-            if let image = phase.image {
-                image.resizable().scaledToFill()
+    private static func launch(_ link: URL?, target: DeepLink.Store, openURL: OpenURLAction, toast: ToastCenter) {
+        guard let link else { return }
+        openURL(link) { accepted in
+            if accepted {
+                Haptics.success()
             } else {
-                ZStack {
-                    Color.secondary.opacity(0.15)
-                    Image(systemName: "app.dashed").foregroundStyle(.secondary)
-                }
+                toast.show("\(target.title) isn't installed", systemImage: "exclamationmark.triangle.fill")
             }
         }
-        .frame(width: size, height: size)
-        .clipShape(RoundedRectangle(cornerRadius: size * 0.225, style: .continuous))
     }
 }
 
-func formatBytes(_ n: Int?) -> String? {
-    guard let n, n > 0 else { return nil }
-    return ByteCountFormatter.string(fromByteCount: Int64(n), countStyle: .file)
+extension View {
+    /// Navigation destinations shared by every tab. Register once per NavigationStack.
+    func appDestinations() -> some View {
+        navigationDestination(for: AltApp.self) { AppDetailView(app: $0) }
+            .navigationDestination(for: AltSource.self) { SourceDetailView(source: $0) }
+            .navigationDestination(for: RecommendedSource.self) { RecommendedSourceView(rec: $0) }
+            .navigationDestination(for: AppListRoute.self) { AppListView(route: $0) }
+    }
 }

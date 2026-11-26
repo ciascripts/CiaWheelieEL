@@ -3,132 +3,357 @@ import UIKit
 
 struct SourcesView: View {
     @EnvironmentObject private var store: SourceStore
+    @EnvironmentObject private var router: Router
+    @EnvironmentObject private var toast: ToastCenter
+    @EnvironmentObject private var recents: RecentSearches
+    @Environment(\.openURL) private var openURL
+    @AppStorage(Prefs.preferredStoreKey) private var preferred: DeepLink.Store = .sidestore
     @State private var showingAdd = false
+    @State private var showingSettings = false
     @State private var confirmReset = false
 
     var body: some View {
         NavigationStack {
             List {
-                ForEach(store.sourceURLs, id: \.self) { url in
-                    SourceRow(url: url, state: store.states[url])
+                Section {
+                    ForEach(store.sourceURLs, id: \.self) { url in
+                        MySourceRow(url: url)
+                            .swipeActions(edge: .trailing) {
+                                Button(role: .destructive) {
+                                    store.remove(url)
+                                } label: {
+                                    Label("Delete", systemImage: "trash")
+                                }
+                                Button {
+                                    UIPasteboard.general.string = url
+                                    toast.show("Source URL copied", systemImage: "doc.on.doc.fill")
+                                } label: {
+                                    Label("Copy", systemImage: "doc.on.doc")
+                                }
+                                .tint(.gray)
+                            }
+                            .swipeActions(edge: .leading) {
+                                Button {
+                                    Installer.addSource(url, to: preferred, openURL: openURL, toast: toast)
+                                } label: {
+                                    Label(preferred.title, systemImage: "plus.app")
+                                }
+                                .tint(.accentColor)
+                            }
+                    }
+                    .onDelete { offsets in
+                        let urls = offsets.map { store.sourceURLs[$0] }
+                        for url in urls { store.remove(url) }
+                    }
+                    .onMove { from, to in store.move(from: from, to: to) }
+                } header: {
+                    Text("\(store.sourceURLs.count) sources · \(store.groups.count) apps")
+                } footer: {
+                    Text("Swipe right to add a source to \(preferred.title). Swipe left to copy or delete it. Sources higher in the list win when the same app is in several.")
                 }
-                .onDelete { offsets in
-                    let urls = offsets.map { store.sourceURLs[$0] }
-                    for url in urls { store.remove(url) }
+
+                let suggestions = Array(Recommendations.featured.filter { !store.contains($0.url) }.prefix(3))
+                if !suggestions.isEmpty {
+                    Section {
+                        ForEach(suggestions) { rec in
+                            NavigationLink(value: rec) { RecommendedRow(rec: rec) }
+                        }
+                        Button {
+                            router.tab = .discover
+                        } label: {
+                            Label("See All Recommendations", systemImage: "sparkles")
+                        }
+                    } header: {
+                        Text("Suggested")
+                    }
                 }
-                .onMove { from, to in store.move(from: from, to: to) }
             }
             .refreshable { await store.refreshAll() }
-            .navigationTitle("My Sources")
-            .navigationDestination(for: AltSource.self) { SourceDetailView(source: $0) }
+            .navigationTitle("Sources")
             .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) { EditButton() }
                 ToolbarItemGroup(placement: .navigationBarTrailing) {
                     Menu {
-                        Button { Task { await store.refreshAll() } } label: { Label("Refresh all", systemImage: "arrow.clockwise") }
-                        Button(role: .destructive) { confirmReset = true } label: { Label("Reset to defaults", systemImage: "arrow.counterclockwise") }
-                    } label: { Image(systemName: "ellipsis.circle") }
-                    Button { showingAdd = true } label: { Image(systemName: "plus") }
+                        Button {
+                            Task { await store.refreshAll() }
+                        } label: {
+                            Label("Refresh All", systemImage: "arrow.clockwise")
+                        }
+                        Button {
+                            showingSettings = true
+                        } label: {
+                            Label("Settings", systemImage: "gearshape")
+                        }
+                        Divider()
+                        Button(role: .destructive) {
+                            confirmReset = true
+                        } label: {
+                            Label("Reset to Defaults", systemImage: "arrow.counterclockwise")
+                        }
+                    } label: {
+                        Image(systemName: "ellipsis.circle")
+                    }
+                    .accessibilityLabel("More")
+                    Button {
+                        showingAdd = true
+                    } label: {
+                        Image(systemName: "plus")
+                    }
+                    .accessibilityLabel("Add source")
                 }
             }
-            .sheet(isPresented: $showingAdd) { AddSourceSheet().environmentObject(store) }
-            .confirmationDialog("Replace your list with the default sources?", isPresented: $confirmReset, titleVisibility: .visible) {
-                Button("Reset", role: .destructive) { Task { await store.resetToDefaults() } }
+            .sheet(isPresented: $showingAdd) {
+                AddSourceSheet()
+                    .environmentObject(store)
+                    .environmentObject(toast)
             }
+            .sheet(isPresented: $showingSettings) {
+                SettingsView()
+                    .environmentObject(store)
+                    .environmentObject(toast)
+                    .environmentObject(recents)
+            }
+            .confirmationDialog("Replace your list with the default sources?", isPresented: $confirmReset,
+                                titleVisibility: .visible) {
+                Button("Reset", role: .destructive) {
+                    Task { await store.resetToDefaults() }
+                }
+            }
+            .appDestinations()
         }
     }
 }
 
-private struct SourceRow: View {
+private struct MySourceRow: View {
     let url: String
-    let state: SourceStore.LoadState?
+    @EnvironmentObject private var store: SourceStore
 
     var body: some View {
-        switch state {
+        switch store.states[url] {
         case .loaded(let source):
             NavigationLink(value: source) {
                 HStack(spacing: 12) {
-                    IconView(url: source.iconURL ?? source.apps.first?.iconURL, size: 40)
+                    IconView(url: source.displayIconURL, size: 44, tint: HexColor.color(source.displayTintHex))
                     VStack(alignment: .leading, spacing: 2) {
                         Text(source.name).font(.headline).lineLimit(1)
-                        Text("\(source.apps.count) app\(source.apps.count == 1 ? "" : "s") · \(url)")
-                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                        Text(detail(for: source)).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    if store.staleErrors[url] != nil {
+                        Spacer(minLength: 4)
+                        Image(systemName: "exclamationmark.icloud")
+                            .foregroundStyle(.orange)
+                            .accessibilityLabel("Couldn't refresh. Showing the saved copy.")
                     }
                 }
+                .padding(.vertical, 2)
             }
         case .failed(let message):
-            VStack(alignment: .leading, spacing: 2) {
-                Label(url, systemImage: "exclamationmark.triangle").font(.subheadline).lineLimit(1)
-                Text(message).font(.caption).foregroundStyle(.red).lineLimit(2)
+            HStack(spacing: 12) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.title3)
+                    .foregroundStyle(.orange)
+                    .frame(width: 44)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(url).font(.subheadline).lineLimit(1)
+                    Text(message).font(.caption).foregroundStyle(.red).lineLimit(2)
+                }
+                Spacer(minLength: 4)
+                Button("Retry") {
+                    Task { await store.retry(url) }
+                }
+                .buttonStyle(.borderless)
+                .font(.subheadline.weight(.semibold))
             }
         case .loading, .none:
-            HStack {
-                ProgressView()
+            HStack(spacing: 12) {
+                ProgressView().frame(width: 44)
                 Text(url).font(.subheadline).foregroundStyle(.secondary).lineLimit(1)
             }
         }
     }
+
+    private func detail(for source: AltSource) -> String {
+        var parts = ["\(source.apps.count) app\(source.apps.count == 1 ? "" : "s")"]
+        if let d = source.lastUpdated {
+            parts.append("updated " + d.formatted(.relative(presentation: .named)))
+        }
+        return parts.joined(separator: " · ")
+    }
 }
 
 struct SourceDetailView: View {
-    @EnvironmentObject private var store: SourceStore
     let source: AltSource
+    @EnvironmentObject private var store: SourceStore
+    @EnvironmentObject private var toast: ToastCenter
     @Environment(\.openURL) private var openURL
-    @State private var failedTarget: String?
+    @AppStorage(Prefs.preferredStoreKey) private var preferred: DeepLink.Store = .sidestore
     @State private var query = ""
-    @State private var copied = false
 
     private var apps: [AltApp] {
-        let q = query.lowercased()
-        return q.isEmpty ? source.apps : source.apps.filter { $0.searchKey.contains(q) }
+        let words = TextNormalizer.words(query)
+        guard !words.isEmpty else { return source.apps }
+        return source.apps.filter { app in
+            words.allSatisfy { w in
+                app.search.name.contains(w) || app.search.developer.contains(w) || app.search.subtitle.contains(w)
+            }
+        }
+    }
+
+    private var statusLine: String {
+        var parts = ["\(source.apps.count) app\(source.apps.count == 1 ? "" : "s")"]
+        if let d = source.lastUpdated {
+            parts.append("updated " + d.formatted(.relative(presentation: .named)))
+        }
+        return parts.joined(separator: " · ")
     }
 
     var body: some View {
+        let saved = store.contains(source.url)
+        let tint = HexColor.color(source.displayTintHex) ?? Color.accentColor
+        let list = apps
+        let words = TextNormalizer.words(query)
         List {
             Section {
-                if let subtitle = source.subtitle { Text(subtitle).font(.callout) }
-                Text(source.url).font(.caption.monospaced()).foregroundStyle(.secondary).textSelection(.enabled)
-                if !store.contains(source.url) {
-                    Button { store.add(loaded: source) } label: {
-                        Label("Save to My Sources", systemImage: "tray.and.arrow.down")
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack(spacing: 14) {
+                        IconView(url: source.displayIconURL, size: 68, tint: tint)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(source.name).font(.title3.weight(.bold)).lineLimit(2)
+                            Text(statusLine).font(.subheadline).foregroundStyle(.secondary)
+                        }
                     }
-                }
-                ForEach(DeepLink.Store.allCases) { target in
-                    Button {
-                        guard let link = DeepLink.addSource(source.url, in: target) else { return }
-                        openURL(link) { ok in if !ok { failedTarget = target.title } }
-                    } label: {
-                        Label("Add to \(target.title)", systemImage: "plus.circle")
+                    if let subtitle = source.subtitle {
+                        Text(subtitle).font(.callout)
                     }
+                    HStack(spacing: 10) {
+                        if saved {
+                            Label("Saved", systemImage: "checkmark")
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 7)
+                                .background(Color(.tertiarySystemFill), in: Capsule())
+                        } else {
+                            Button {
+                                store.add(loaded: source)
+                                Haptics.success()
+                                toast.show("Added \(source.name)")
+                            } label: {
+                                Label("Save Source", systemImage: "plus").frame(maxWidth: .infinity)
+                            }
+                            .buttonStyle(.borderedProminent)
+                        }
+                        Button {
+                            Installer.addSource(source.url, to: preferred, openURL: openURL, toast: toast)
+                        } label: {
+                            Label(preferred.title, systemImage: "plus.app").frame(maxWidth: .infinity)
+                        }
+                        .buttonStyle(.bordered)
+                        moreMenu(saved: saved)
+                    }
+                    .font(.subheadline.weight(.semibold))
                 }
-                Button {
-                    UIPasteboard.general.string = source.url
-                    copied = true
-                } label: {
-                    Label(copied ? "Copied!" : "Copy source URL", systemImage: "doc.on.doc")
-                }
-                if let site = source.website {
-                    Button { openURL(site) } label: { Label("Website", systemImage: "safari") }
-                }
+                .padding(.vertical, 6)
             }
-            Section("\(source.apps.count) apps") {
-                ForEach(apps) { app in
-                    NavigationLink { AppDetailView(app: app) } label: { AppRow(app: app, showSource: false) }
+
+            Section {
+                ForEach(list) { app in
+                    NavigationLink(value: app) {
+                        AppRow(app: app, highlight: words, showSource: false)
+                    }
                 }
+            } header: {
+                Text("\(list.count) App\(list.count == 1 ? "" : "s")")
             }
         }
         .searchable(text: $query, prompt: "Search this source")
+        .autocorrectionDisabled()
+        .textInputAutocapitalization(.never)
         .navigationTitle(source.name)
-        .modifier(LinkOpener(failedTarget: $failedTarget))
+        .navigationBarTitleDisplayMode(.inline)
+    }
+
+    private func moreMenu(saved: Bool) -> some View {
+        Menu {
+            ForEach(DeepLink.Store.allCases.filter { $0 != preferred }) { other in
+                Button {
+                    Installer.addSource(source.url, to: other, openURL: openURL, toast: toast)
+                } label: {
+                    Label("Add to \(other.title)", systemImage: "plus.app")
+                }
+            }
+            Button {
+                UIPasteboard.general.string = source.url
+                toast.show("Source URL copied", systemImage: "doc.on.doc.fill")
+            } label: {
+                Label("Copy Source URL", systemImage: "doc.on.doc")
+            }
+            if let link = URL(string: source.url) {
+                ShareLink(item: link) {
+                    Label("Share Source", systemImage: "square.and.arrow.up")
+                }
+            }
+            if let site = source.website {
+                Button {
+                    openURL(site)
+                } label: {
+                    Label("Website", systemImage: "safari")
+                }
+            }
+            if saved {
+                Divider()
+                Button(role: .destructive) {
+                    store.remove(source.url)
+                    toast.show("Removed \(source.name)", systemImage: "trash.fill")
+                } label: {
+                    Label("Remove Source", systemImage: "trash")
+                }
+            }
+        } label: {
+            Image(systemName: "ellipsis")
+                .frame(width: 36, height: 30)
+                .background(Color(.tertiarySystemFill), in: Capsule())
+        }
+        .accessibilityLabel("More options")
+    }
+}
+
+/// Loads a recommended source, then shows it like any other source.
+struct RecommendedSourceView: View {
+    let rec: RecommendedSource
+    @EnvironmentObject private var store: SourceStore
+
+    var body: some View {
+        content
+            .task { await store.loadPreview(rec.url) }
+    }
+
+    @ViewBuilder private var content: some View {
+        switch store.previewState(rec.url) {
+        case .loaded(let source):
+            SourceDetailView(source: source)
+        case .failed(let message):
+            VStack(spacing: 16) {
+                EmptyStateView(systemImage: "wifi.exclamationmark", title: "Couldn't load \(rec.name)", message: message)
+                Button("Try Again") {
+                    Task { await store.loadPreview(rec.url) }
+                }
+                .buttonStyle(.borderedProminent)
+            }
+            .navigationTitle(rec.name)
+        case .loading, .none:
+            ProgressView("Loading \(rec.name)…")
+                .navigationTitle(rec.name)
+        }
     }
 }
 
 struct AddSourceSheet: View {
     @EnvironmentObject private var store: SourceStore
+    @EnvironmentObject private var toast: ToastCenter
     @Environment(\.dismiss) private var dismiss
     @State private var text = ""
-    @State private var error: String?
+    @State private var error: String? = nil
     @State private var working = false
+    @FocusState private var focused: Bool
 
     var body: some View {
         NavigationStack {
@@ -138,117 +363,71 @@ struct AddSourceSheet: View {
                         .keyboardType(.URL)
                         .textInputAutocapitalization(.never)
                         .autocorrectionDisabled()
-                    Button("Paste from clipboard") {
-                        if let s = UIPasteboard.general.string { text = s }
+                        .focused($focused)
+                        .submitLabel(.done)
+                        .onSubmit(add)
+                    if UIPasteboard.general.hasStrings {
+                        Button {
+                            if let s = UIPasteboard.general.string { text = s }
+                        } label: {
+                            Label("Paste", systemImage: "doc.on.clipboard")
+                        }
                     }
+                } header: {
+                    Text("Source URL")
                 } footer: {
-                    Text("Source URLs and sidestore:// or altstore:// source links both work. The source is checked before it's saved.")
+                    Text("Paste a source URL, or a sidestore:// or altstore:// link. It's checked before it's saved.")
                 }
+
                 if let error {
-                    Section { Text(error).foregroundStyle(.red) }
+                    Section {
+                        Label(error, systemImage: "exclamationmark.triangle.fill")
+                            .foregroundStyle(.red)
+                    }
+                }
+
+                let suggestions = Recommendations.all.filter { !store.contains($0.url) }
+                if !suggestions.isEmpty {
+                    Section {
+                        ForEach(suggestions) { rec in RecommendedRow(rec: rec) }
+                    } header: {
+                        Text("Recommended")
+                    }
                 }
             }
             .navigationTitle("Add Source")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .cancellationAction) { Button("Cancel") { dismiss() } }
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                }
                 ToolbarItem(placement: .confirmationAction) {
-                    if working { ProgressView() } else {
-                        Button("Add") {
-                            working = true
-                            error = nil
-                            Task {
-                                do { try await store.add(text); dismiss() }
-                                catch { self.error = error.localizedDescription }
-                                working = false
-                            }
-                        }
-                        .disabled(text.trimmingCharacters(in: .whitespaces).isEmpty)
+                    if working {
+                        ProgressView()
+                    } else {
+                        Button("Add", action: add)
+                            .disabled(text.trimmingCharacters(in: .whitespaces).isEmpty)
                     }
                 }
             }
+            .onAppear { focused = true }
         }
-        .presentationDetents([.medium, .large])
     }
-}
 
-struct DiscoverView: View {
-    @EnvironmentObject private var store: SourceStore
-    @EnvironmentObject private var discovery: Discovery
-    @State private var query = "altstore source"
-
-    var body: some View {
-        NavigationStack {
-            List {
-                Section {
-                    HStack {
-                        TextField("Search GitHub for sources", text: $query)
-                            .textInputAutocapitalization(.never)
-                            .autocorrectionDisabled()
-                            .submitLabel(.search)
-                            .onSubmit { discovery.search(query) }
-                        if discovery.isSearching {
-                            Button("Stop") { discovery.cancel() }
-                                .buttonStyle(.borderless)
-                        } else {
-                            Button("Search") { discovery.search(query) }
-                                .buttonStyle(.borderless)
-                                .disabled(query.trimmingCharacters(in: .whitespaces).isEmpty)
-                        }
-                    }
-                    ScrollView(.horizontal, showsIndicators: false) {
-                        HStack {
-                            ForEach(Discovery.presets, id: \.self) { p in
-                                Button(p) { query = p; discovery.search(p) }
-                                    .buttonStyle(.bordered)
-                                    .font(.caption)
-                            }
-                        }
-                    }
-                } footer: {
-                    Text("Searches public GitHub repositories and checks each one for a working AltStore/SideStore source file. Anyone can publish a source, so only install apps from sources you trust.")
-                }
-
-                if let status = discovery.status {
-                    Section {
-                        HStack {
-                            if discovery.isSearching { ProgressView() }
-                            Text(status).font(.footnote).foregroundStyle(.secondary)
-                        }
-                    }
-                }
-
-                if !discovery.results.isEmpty {
-                    Section("Found sources") {
-                        ForEach(discovery.results) { found in
-                            NavigationLink(value: found.source) {
-                                HStack(spacing: 12) {
-                                    IconView(url: found.source.iconURL ?? found.source.apps.first?.iconURL, size: 40)
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text(found.source.name).font(.headline).lineLimit(1)
-                                        Text("\(found.source.apps.count) apps · \(found.repo)")
-                                            .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-                                    }
-                                    Spacer()
-                                    if store.contains(found.source.url) {
-                                        Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
-                                    } else {
-                                        Button { store.add(loaded: found.source) } label: {
-                                            Image(systemName: "plus.circle.fill").font(.title2)
-                                        }
-                                        .buttonStyle(.borderless)
-                                    }
-                                }
-                            }
-                        }
-                        if discovery.canLoadMore && !discovery.isSearching {
-                            Button("Search more repositories") { discovery.loadMore() }
-                        }
-                    }
-                }
+    private func add() {
+        guard !working, !text.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+        working = true
+        error = nil
+        Task {
+            do {
+                let source = try await store.add(text)
+                Haptics.success()
+                toast.show("Added \(source.name)")
+                dismiss()
+            } catch {
+                self.error = error.localizedDescription
             }
-            .navigationTitle("Discover")
-            .navigationDestination(for: AltSource.self) { SourceDetailView(source: $0) }
+            working = false
         }
     }
 }
