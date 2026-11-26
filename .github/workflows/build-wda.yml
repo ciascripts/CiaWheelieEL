@@ -1,0 +1,54 @@
+name: Build WebDriverAgent IPA
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - ".github/workflows/build-wda.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - name: Get WebDriverAgent source (latest release)
+        run: |
+          tag=$(curl -fsSL https://api.github.com/repos/appium/WebDriverAgent/releases/latest | python3 -c 'import json,sys; print(json.load(sys.stdin)["tag_name"])')
+          echo "WebDriverAgent $tag"
+          git clone --depth 1 --branch "$tag" https://github.com/appium/WebDriverAgent.git wda
+
+      - name: Build for testing (unsigned)
+        working-directory: wda
+        run: |
+          set -o pipefail
+          xcodebuild build-for-testing \
+            -project WebDriverAgent.xcodeproj \
+            -scheme WebDriverAgentRunner \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -configuration Release \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            2>&1 | tee build.log | grep -E "error:|BUILD (SUCCEEDED|FAILED)|TEST BUILD (SUCCEEDED|FAILED)"
+          app=build/Build/Products/Release-iphoneos/WebDriverAgentRunner-Runner.app
+          test -d "$app/PlugIns/WebDriverAgentRunner.xctest"
+          ls "$app" "$app/PlugIns"
+
+      - name: Package IPA
+        working-directory: wda
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/WebDriverAgentRunner-Runner.app Payload/
+          zip -qry ../WebDriverAgent.ipa Payload
+          ls -lh ../WebDriverAgent.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: WebDriverAgent-ipa
+          path: WebDriverAgent.ipa
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: wda-build-log
+          path: wda/build.log
