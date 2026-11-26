@@ -35,7 +35,10 @@ final class BridgeModel: ObservableObject {
     private static let urlKey = "bridgeURL"
 
     @Published var connectionURL: String {
-        didSet { UserDefaults.standard.set(connectionURL, forKey: Self.urlKey) }
+        didSet {
+            UserDefaults.standard.set(connectionURL, forKey: Self.urlKey)
+            problem = nil
+        }
     }
     @Published private(set) var messages: [BridgeMessage] = []
     @Published private(set) var task: BridgeTask?
@@ -51,17 +54,16 @@ final class BridgeModel: ObservableObject {
     }
 
     /// Accepts the MCP URL (https://host/mcp/KEY) or the API URL and returns https://host/api/KEY.
+    /// Finds the bridge URL anywhere in the pasted text, so invisible characters,
+    /// quotes or extra words copied along with it don't matter.
     var apiBase: URL? {
-        let text = connectionURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let url = URL(string: text), let host = url.host, url.scheme == "https" || url.scheme == "http" else { return nil }
-        let parts = url.path.split(separator: "/").map(String.init)
-        guard parts.count >= 2, ["mcp", "api"].contains(parts[0]) else { return nil }
-        var comps = URLComponents()
-        comps.scheme = url.scheme
-        comps.host = host
-        comps.port = url.port
-        comps.path = "/api/\(parts[1])"
-        return comps.url
+        let pattern = #"(https?)://([A-Za-z0-9.\-]+(?::[0-9]+)?)/(?:mcp|api)/([A-Za-z0-9_\-]+)"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: connectionURL, range: NSRange(connectionURL.startIndex..., in: connectionURL)),
+              let scheme = Range(match.range(at: 1), in: connectionURL),
+              let host = Range(match.range(at: 2), in: connectionURL),
+              let key = Range(match.range(at: 3), in: connectionURL) else { return nil }
+        return URL(string: "\(connectionURL[scheme])://\(connectionURL[host])/api/\(connectionURL[key])")
     }
 
     var mcpURL: String? {
