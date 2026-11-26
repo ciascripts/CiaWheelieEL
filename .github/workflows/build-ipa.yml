@@ -2,10 +2,12 @@ name: Build SourceFinder IPA
 
 on:
   push:
+    # Listing only `tags` would make GitHub skip branch pushes, so list both.
+    branches: ["**"]
+    tags: ["v*"]
     paths:
       - "SourceFinder/**"
       - ".github/workflows/build-ipa.yml"
-    tags: ["v*"]
   workflow_dispatch:
 
 permissions:
