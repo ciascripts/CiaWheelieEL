@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "ipad": {
+      "command": "python",
+      "args": ["C:\\path\\to\\CiaWheelieEL\\ipad-control\\mcp\\server.py"],
+      "env": {
+        "WDA_URL": "http://127.0.0.1:8100"
+      }
+    }
+  }
+}
