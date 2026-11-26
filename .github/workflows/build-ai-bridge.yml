@@ -1,0 +1,56 @@
+name: Build AI Bridge IPA
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "ai-bridge/ios/**"
+      - ".github/workflows/build-ai-bridge.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ai-bridge/ios
+        run: xcodegen generate
+
+      - name: Build (unsigned)
+        working-directory: ai-bridge/ios
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project AIBridge.xcodeproj \
+            -scheme AIBridge \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee build.log | grep -E "error:|warning: .*AIBridge|BUILD (SUCCEEDED|FAILED)"
+          test -f build/Build/Products/Release-iphoneos/AIBridge.app/AIBridge
+
+      - name: Package IPA
+        working-directory: ai-bridge/ios
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/AIBridge.app Payload/
+          zip -qry AIBridge.ipa Payload
+          ls -lh AIBridge.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: AIBridge-ipa
+          path: ai-bridge/ios/AIBridge.ipa
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: ai-bridge-build-log
+          path: ai-bridge/ios/build.log
