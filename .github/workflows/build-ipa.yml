@@ -1,0 +1,65 @@
+name: Build SourceFinder IPA
+
+on:
+  push:
+    paths:
+      - "SourceFinder/**"
+      - ".github/workflows/build-ipa.yml"
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: SourceFinder
+        run: xcodegen generate
+
+      - name: Build (unsigned)
+        working-directory: SourceFinder
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project SourceFinder.xcodeproj \
+            -scheme SourceFinder \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build | tee build.log | grep -E "error:|warning: .*SourceFinder|BUILD (SUCCEEDED|FAILED)" || true
+          test -d build/Build/Products/Release-iphoneos/SourceFinder.app
+
+      - name: Package IPA
+        working-directory: SourceFinder
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/SourceFinder.app Payload/
+          zip -qry SourceFinder.ipa Payload
+          ls -lh SourceFinder.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: SourceFinder-ipa
+          path: SourceFinder/SourceFinder.ipa
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: build-log
+          path: SourceFinder/build.log
+
+      - name: Publish release (tags only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: SourceFinder/SourceFinder.ipa
