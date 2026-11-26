@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct SourcesView: View {
     @EnvironmentObject private var store: SourceStore
@@ -11,8 +12,11 @@ struct SourcesView: View {
                 ForEach(store.sourceURLs, id: \.self) { url in
                     SourceRow(url: url, state: store.states[url])
                 }
-                .onDelete { idx in idx.map { store.sourceURLs[$0] }.forEach(store.remove) }
-                .onMove(perform: store.move)
+                .onDelete { offsets in
+                    let urls = offsets.map { store.sourceURLs[$0] }
+                    for url in urls { store.remove(url) }
+                }
+                .onMove { from, to in store.move(from: from, to: to) }
             }
             .refreshable { await store.refreshAll() }
             .navigationTitle("My Sources")
@@ -27,7 +31,7 @@ struct SourcesView: View {
                     Button { showingAdd = true } label: { Image(systemName: "plus") }
                 }
             }
-            .sheet(isPresented: $showingAdd) { AddSourceSheet() }
+            .sheet(isPresented: $showingAdd) { AddSourceSheet().environmentObject(store) }
             .confirmationDialog("Replace your list with the default sources?", isPresented: $confirmReset, titleVisibility: .visible) {
                 Button("Reset", role: .destructive) { Task { await store.resetToDefaults() } }
             }
@@ -185,8 +189,10 @@ struct DiscoverView: View {
                             .onSubmit { discovery.search(query) }
                         if discovery.isSearching {
                             Button("Stop") { discovery.cancel() }
+                                .buttonStyle(.borderless)
                         } else {
                             Button("Search") { discovery.search(query) }
+                                .buttonStyle(.borderless)
                                 .disabled(query.trimmingCharacters(in: .whitespaces).isEmpty)
                         }
                     }

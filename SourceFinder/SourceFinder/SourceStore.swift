@@ -60,7 +60,7 @@ final class SourceStore: ObservableObject {
         "https://quarksources.github.io/dist/quantumsource.min.json",
     ]
 
-    private let defaultsKey = "savedSourceURLs"
+    private static let defaultsKey = "savedSourceURLs"
 
     @Published private(set) var sourceURLs: [String]
     @Published private(set) var states: [String: LoadState] = [:]
@@ -68,7 +68,7 @@ final class SourceStore: ObservableObject {
     @Published private(set) var isRefreshing = false
 
     init() {
-        sourceURLs = UserDefaults.standard.stringArray(forKey: defaultsKey) ?? Self.defaultSources
+        sourceURLs = UserDefaults.standard.stringArray(forKey: Self.defaultsKey) ?? Self.defaultSources
     }
 
     var loadedSources: [AltSource] {
@@ -86,8 +86,12 @@ final class SourceStore: ObservableObject {
         await withTaskGroup(of: (String, LoadState).self) { group in
             for u in sourceURLs {
                 group.addTask {
-                    do { return (u, .loaded(try await SourceFetcher.fetch(u))) }
-                    catch { return (u, .failed(error.localizedDescription)) }
+                    do {
+                        let source = try await SourceFetcher.fetch(u)
+                        return (u, LoadState.loaded(source))
+                    } catch {
+                        return (u, LoadState.failed(error.localizedDescription))
+                    }
                 }
             }
             for await (u, state) in group {
@@ -142,7 +146,7 @@ final class SourceStore: ObservableObject {
     }
 
     private func save() {
-        UserDefaults.standard.set(sourceURLs, forKey: defaultsKey)
+        UserDefaults.standard.set(sourceURLs, forKey: Self.defaultsKey)
     }
 
     private func rebuildApps() {

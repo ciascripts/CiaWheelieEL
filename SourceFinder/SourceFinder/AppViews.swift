@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct AppSearchView: View {
     @EnvironmentObject private var store: SourceStore
@@ -121,7 +122,7 @@ struct AppDetailView: View {
                 Section("Install v\(latest.version)") {
                     ForEach(DeepLink.Store.allCases) { target in
                         Button {
-                            open(DeepLink.install(ipa, in: target), name: target.title)
+                            openLink(DeepLink.install(ipa, in: target), name: target.title)
                         } label: {
                             Label("Install with \(target.title)", systemImage: "arrow.down.app")
                         }
@@ -142,7 +143,7 @@ struct AppDetailView: View {
                 LabeledContent("Name", value: app.sourceName)
                 ForEach(DeepLink.Store.allCases) { target in
                     Button {
-                        open(DeepLink.addSource(app.sourceURL, in: target), name: target.title)
+                        openLink(DeepLink.addSource(app.sourceURL, in: target), name: target.title)
                     } label: {
                         Label("Add source to \(target.title)", systemImage: "plus.circle")
                     }
@@ -190,7 +191,7 @@ struct AppDetailView: View {
                             if let notes = v.notes { Text(notes).font(.caption).foregroundStyle(.secondary).lineLimit(4) }
                             if let ipa = v.downloadURL, v != app.latest {
                                 Button("Install this version with SideStore") {
-                                    open(DeepLink.install(ipa, in: .sidestore), name: "SideStore")
+                                    openLink(DeepLink.install(ipa, in: .sidestore), name: "SideStore")
                                 }
                                 .font(.caption)
                                 .buttonStyle(.borderless)
@@ -205,7 +206,7 @@ struct AppDetailView: View {
         .modifier(LinkOpener(failedTarget: $failedTarget))
     }
 
-    private func open(_ url: URL?, name: String) {
+    private func openLink(_ url: URL?, name: String) {
         guard let url else { return }
         openURL(url) { accepted in if !accepted { failedTarget = name } }
     }

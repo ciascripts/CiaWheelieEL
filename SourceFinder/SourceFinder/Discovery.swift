@@ -19,12 +19,6 @@ final class Discovery: ObservableObject {
         "ipa library",
     ]
 
-    /// File names commonly used for sources, tried in order.
-    static let candidateFiles = [
-        "apps.json", "source.json", "altstore.json", "repo.json", "index.json",
-        "sidestore.json", "app-repo.json", "altsource.json", "altstore-source.json", "apps.min.json",
-    ]
-
     @Published private(set) var results: [Found] = []
     @Published private(set) var isSearching = false
     @Published private(set) var status: String?
@@ -107,7 +101,8 @@ final class Discovery: ObservableObject {
         status = "Checking \(repos.count) repositories…"
         await withTaskGroup(of: Found?.self) { group in
             for repo in repos {
-                group.addTask { await Self.probe(repo.full_name, branch: repo.default_branch) }
+                let name = repo.full_name, branch = repo.default_branch
+                group.addTask { await SourceProbe.probe(name, branch: branch) }
             }
             for await found in group {
                 checked += 1
@@ -134,20 +129,10 @@ final class Discovery: ObservableObject {
         }
     }
 
-    private nonisolated static func probe(_ repo: String, branch: String) async -> Found? {
-        for file in candidateFiles {
-            if Task.isCancelled { return nil }
-            let url = "https://raw.githubusercontent.com/\(repo)/\(branch)/\(file)"
-            if let source = try? await SourceFetcher.fetch(url), !source.apps.isEmpty {
-                return Found(repo: repo, source: source)
-            }
-        }
-        return nil
-    }
-
     private func probeViaContents(_ repo: String) async -> Found? {
         guard let url = URL(string: "https://api.github.com/repos/\(repo)/contents/") else { return nil }
-        guard let (data, resp) = try? await SourceFetcher.session.data(for: githubRequest(url)) else { return nil }
+        guard let response = try? await SourceFetcher.session.data(for: githubRequest(url)) else { return nil }
+        let (data, resp) = response
         if let http = resp as? HTTPURLResponse, http.statusCode == 403 || http.statusCode == 429 {
             rateLimited = true
             return nil
@@ -155,7 +140,7 @@ final class Discovery: ObservableObject {
         guard let items = try? JSONDecoder().decode([ContentItem].self, from: data) else { return nil }
         let jsonFiles = items.filter {
             $0.type == "file" && $0.name.lowercased().hasSuffix(".json")
-                && !Self.candidateFiles.contains($0.name)
+                && !SourceProbe.candidateFiles.contains($0.name)
                 && !["package.json", "package-lock.json", "tsconfig.json", "renovate.json"].contains($0.name.lowercased())
         }
         for item in jsonFiles.prefix(5) {
@@ -172,5 +157,26 @@ final class Discovery: ObservableObject {
         req.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
         req.setValue("SourceFinder-iOS", forHTTPHeaderField: "User-Agent")
         return req
+    }
+}
+
+/// Checks a GitHub repo for a source file with a well-known name.
+/// Kept outside the main-actor class so the checks run in parallel off the main thread.
+enum SourceProbe {
+    /// File names commonly used for sources, tried in order.
+    static let candidateFiles = [
+        "apps.json", "source.json", "altstore.json", "repo.json", "index.json",
+        "sidestore.json", "app-repo.json", "altsource.json", "altstore-source.json", "apps.min.json",
+    ]
+
+    static func probe(_ repo: String, branch: String) async -> Discovery.Found? {
+        for file in candidateFiles {
+            if Task.isCancelled { return nil }
+            let url = "https://raw.githubusercontent.com/\(repo)/\(branch)/\(file)"
+            if let source = try? await SourceFetcher.fetch(url), !source.apps.isEmpty {
+                return Discovery.Found(repo: repo, source: source)
+            }
+        }
+        return nil
     }
 }
