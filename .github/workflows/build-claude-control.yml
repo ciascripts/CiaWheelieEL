@@ -1,0 +1,56 @@
+name: Build Claude Control IPA
+
+on:
+  push:
+    branches: ["**"]
+    paths:
+      - "ipad-control/ClaudeControl/**"
+      - ".github/workflows/build-claude-control.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        working-directory: ipad-control/ClaudeControl
+        run: xcodegen generate
+
+      - name: Build (unsigned)
+        working-directory: ipad-control/ClaudeControl
+        run: |
+          set -o pipefail
+          xcodebuild \
+            -project ClaudeControl.xcodeproj \
+            -scheme ClaudeControl \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY="" \
+            build 2>&1 | tee build.log | grep -E "error:|warning: .*ClaudeControl|BUILD (SUCCEEDED|FAILED)"
+          test -f build/Build/Products/Release-iphoneos/ClaudeControl.app/ClaudeControl
+
+      - name: Package IPA
+        working-directory: ipad-control/ClaudeControl
+        run: |
+          mkdir -p Payload
+          cp -R build/Build/Products/Release-iphoneos/ClaudeControl.app Payload/
+          zip -qry ClaudeControl.ipa Payload
+          ls -lh ClaudeControl.ipa
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClaudeControl-ipa
+          path: ipad-control/ClaudeControl/ClaudeControl.ipa
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: claude-control-build-log
+          path: ipad-control/ClaudeControl/build.log
